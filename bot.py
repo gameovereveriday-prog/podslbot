@@ -5,8 +5,8 @@ from telebot import types
 
 # ===== НАСТРОЙКИ =====
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_ID = 123456789        # ← ваш ID
-CHANNEL_ID = -1001234567890 # ← ID канала
+ADMIN_ID = 957705940        # ← ваш ID
+CHANNEL_ID = -1004300683892 # ← ID канала
 
 if not BOT_TOKEN:
     print("❌ ОШИБКА: Переменная BOT_TOKEN не найдена!")
