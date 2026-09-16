@@ -3,6 +3,7 @@ import os
 import re
 from telebot import types
 
+# ===== НАСТРОЙКИ =====
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = 957705940        # ← ваш ID
 CHANNEL_ID = -1004300683892 # ← ID канала
@@ -41,9 +42,7 @@ def contains_bad_words(text: str) -> list:
             found.append(word)
     return found
 
-# ===== ХРАНИЛИЩЕ СООБЩЕНИЙ, ОЖИДАЮЩИХ МОДЕРАЦИИ =====
-# Ключ — message_id сообщения, которое вы получили в личке.
-# Значение — message_id оригинала (чтобы можно было copy_message).
+# ===== ХРАНИЛИЩЕ ДЛЯ МОДЕРАЦИИ =====
 pending = {}
 
 # ===== ПРИВЕТСТВИЕ =====
@@ -59,128 +58,143 @@ def send_welcome(message):
         "📷 Фото и видео — после проверки администратором."
     )
 
-# ===== ОБРАБОТКА СООБЩЕНИЙ ОТ ПОЛЬЗОВАТЕЛЕЙ =====
-@bot.message_handler(func=lambda message: message.chat.type == 'private' and message.from_user.id != ADMIN_ID)
+# ===== ОСНОВНОЙ ОБРАБОТЧИК (все типы контента, включая сообщения от админа) =====
+@bot.message_handler(
+    content_types=['text', 'photo', 'video', 'document', 'voice',
+                   'audio', 'video_note', 'animation', 'sticker'],
+    func=lambda message: message.chat.type == 'private'
+                         and not (message.text or "").startswith('/')
+)
 def handle_anonymous_message(message):
     user = message.from_user
+    is_admin = (user.id == ADMIN_ID)
+
     text_to_check = message.text or message.caption or ""
     bad_found = contains_bad_words(text_to_check)
-    is_media = message.content_type in ('photo', 'video', 'document', 'voice', 'audio', 'video_note', 'animation')
-
-    # === ШАПКА ДЛЯ АДМИНА ===
-    sender_info = (
-        f"👤 От: {user.first_name} {user.last_name or ''}\n"
-        f"🔗 Username: @{user.username or 'нет'}\n"
-        f"🆔 ID: {user.id}\n"
+    is_media = message.content_type in (
+        'photo', 'video', 'document', 'voice',
+        'audio', 'video_note', 'animation', 'sticker'
     )
-    if bad_found:
-        sender_info += f"🚫 Найдено: {', '.join(bad_found)}\n"
-    sender_info += "➖➖➖➖➖➖➖➖➖➖"
 
     try:
-        # 1. Отправляем шапку вам
-        bot.send_message(ADMIN_ID, sender_info)
+        # ===== ШАПКА ВАМ (только если пишет НЕ админ) =====
+        if not is_admin:
+            sender_info = (
+                f"👤 От: {user.first_name} {user.last_name or ''}\n"
+                f"🔗 Username: @{user.username or 'нет'}\n"
+                f"🆔 ID: {user.id}\n"
+            )
+            if bad_found:
+                sender_info += f"🚫 Найдено: {', '.join(bad_found)}\n"
+            sender_info += "➖➖➖➖➖➖➖➖➖➖"
+            bot.send_message(ADMIN_ID, sender_info)
 
-        # 2. Копируем само сообщение вам и получаем message_id копии
-        copied = bot.copy_message(
-            chat_id=ADMIN_ID,
-            from_chat_id=message.chat.id,
-            message_id=message.message_id
-        )
+            # Копия сообщения вам
+            copied = bot.copy_message(
+                chat_id=ADMIN_ID,
+                from_chat_id=message.chat.id,
+                message_id=message.message_id
+            )
+            target_chat_for_buttons = ADMIN_ID
+            copied_id = copied.message_id
+        else:
+            # Если пишет сам админ — не дублируем себе шапку,
+            # а используем ЕГО ЖЕ сообщение как объект модерации.
+            target_chat_for_buttons = message.chat.id
+            copied_id = message.message_id
 
-        # ===== ЛОГИКА: ТЕКСТ vs МЕДИА =====
-        if is_media:
-            # --- ФОТО/ВИДЕО: ждём вашего решения через кнопки ---
-            pending[copied.message_id] = message.message_id
+        # ===== ЛОГИКА =====
+        if is_media or bad_found:
+            # --- Требуется модерация (медиа ИЛИ мат) ---
+            pending[(target_chat_for_buttons, copied_id)] = message.message_id
 
             markup = types.InlineKeyboardMarkup()
             markup.add(
-                types.InlineKeyboardButton("✅ Опубликовать", callback_data=f"pub_{copied.message_id}"),
-                types.InlineKeyboardButton("❌ Отклонить", callback_data=f"rej_{copied.message_id}")
+                types.InlineKeyboardButton(
+                    "✅ Опубликовать",
+                    callback_data=f"pub|{target_chat_for_buttons}|{copied_id}"
+                ),
+                types.InlineKeyboardButton(
+                    "❌ Отклонить",
+                    callback_data=f"rej|{target_chat_for_buttons}|{copied_id}"
+                )
             )
+            label = "📷 Медиа на модерации" if is_media else "⚠️ Текст с запрещёнными словами"
             bot.send_message(
-                ADMIN_ID,
-                "📷 Медиа на модерации. Что делаем?",
+                target_chat_for_buttons,
+                f"{label}. Что делаем?",
                 reply_markup=markup
             )
-            bot.reply_to(
-                message,
-                "✅ Ваше медиа отправлено на проверку администратору."
-            )
-
-        else:
-            # --- ТЕКСТ: как и раньше, авто с фильтром ---
-            if not bad_found:
-                bot.copy_message(
-                    chat_id=CHANNEL_ID,
-                    from_chat_id=message.chat.id,
-                    message_id=message.message_id
-                )
-                bot.reply_to(message, "✅ Ваше сообщение опубликовано анонимно!")
-            else:
-                # Мат в тексте — тоже ждёт вашего решения (кнопки)
-                pending[copied.message_id] = message.message_id
-                markup = types.InlineKeyboardMarkup()
-                markup.add(
-                    types.InlineKeyboardButton("✅ Опубликовать", callback_data=f"pub_{copied.message_id}"),
-                    types.InlineKeyboardButton("❌ Отклонить", callback_data=f"rej_{copied.message_id}")
-                )
-                bot.send_message(
-                    ADMIN_ID,
-                    "⚠️ Текст с запрещёнными словами. Что делаем?",
-                    reply_markup=markup
-                )
+            if not is_admin:
                 bot.reply_to(
                     message,
                     "✅ Ваше сообщение отправлено на проверку администратору."
                 )
+        else:
+            # --- Чистый текст: авто в канал ---
+            bot.copy_message(
+                chat_id=CHANNEL_ID,
+                from_chat_id=message.chat.id,
+                message_id=message.message_id
+            )
+            if not is_admin:
+                bot.reply_to(message, "✅ Ваше сообщение опубликовано анонимно!")
+            else:
+                bot.reply_to(message, "✅ Опубликовано в канал (тест админа).")
 
     except Exception as e:
         bot.reply_to(message, "❌ Ошибка при отправке. Попробуйте позже.")
         print(f"Ошибка: {e}")
 
-# ===== ОБРАБОТКА КНОПОК АДМИНА =====
+# ===== ОБРАБОТКА КНОПОК =====
 @bot.callback_query_handler(func=lambda call: True)
 def handle_callback(call):
     if call.from_user.id != ADMIN_ID:
         bot.answer_callback_query(call.id, "Нет доступа")
         return
 
-    action, msg_id_str = call.data.split("_", 1)
-    pending_msg_id = int(msg_id_str)
+    try:
+        action, chat_id_str, msg_id_str = call.data.split("|")
+        target_chat = int(chat_id_str)
+        pending_msg_id = int(msg_id_str)
+    except ValueError:
+        bot.answer_callback_query(call.id, "Ошибка данных")
+        return
 
-    if pending_msg_id not in pending:
+    key = (target_chat, pending_msg_id)
+    if key not in pending:
         bot.answer_callback_query(call.id, "Уже обработано")
         bot.edit_message_reply_markup(
-            chat_id=ADMIN_ID,
+            chat_id=call.message.chat.id,
             message_id=call.message.message_id,
             reply_markup=None
         )
         return
 
-    original_msg_id = pending.pop(pending_msg_id)
+    original_msg_id = pending.pop(key)
 
     if action == "pub":
         try:
             bot.copy_message(
                 chat_id=CHANNEL_ID,
-                from_chat_id=ADMIN_ID,
+                from_chat_id=target_chat,
                 message_id=pending_msg_id
             )
             bot.answer_callback_query(call.id, "✅ Опубликовано")
             bot.edit_message_text(
                 "✅ Опубликовано в канал",
-                chat_id=ADMIN_ID,
+                chat_id=call.message.chat.id,
                 message_id=call.message.message_id
             )
         except Exception as e:
             bot.answer_callback_query(call.id, f"Ошибка: {e}")
+            print(f"Ошибка публикации: {e}")
 
     elif action == "rej":
         bot.answer_callback_query(call.id, "❌ Отклонено")
         bot.edit_message_text(
             "❌ Отклонено",
-            chat_id=ADMIN_ID,
+            chat_id=call.message.chat.id,
             message_id=call.message.message_id
         )
 
